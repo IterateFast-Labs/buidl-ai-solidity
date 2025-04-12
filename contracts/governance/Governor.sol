@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: MIT
 // OpenZeppelin Contracts (last updated v5.3.0) (governance/Governor.sol)
 
+// >>> FISSION MOD
+// Example modifications for AI-based voting, storing reason logs, etc.
+
 pragma solidity ^0.8.20;
 
 import {IERC721Receiver} from "../token/ERC721/IERC721Receiver.sol";
@@ -47,23 +50,43 @@ abstract contract Governor is Context, ERC165, EIP712, Nonces, IGovernor, IERC72
     bytes32 private constant ALL_PROPOSAL_STATES_BITMAP = bytes32((2 ** (uint8(type(ProposalState).max) + 1)) - 1);
     string private _name;
 
-    mapping(uint256 proposalId => ProposalCore) private _proposals;
+    mapping(uint256 => ProposalCore) private _proposals;
 
     // This queue keeps track of the governor operating on itself. Calls to functions protected by the {onlyGovernance}
-    // modifier needs to be whitelisted in this queue. Whitelisting is set in {execute}, consumed by the
+    // modifier need to be whitelisted in this queue. Whitelisting is set in {execute}, consumed by the
     // {onlyGovernance} modifier and eventually reset after {_executeOperations} completes. This ensures that the
     // execution of {onlyGovernance} protected calls can only be achieved through successful proposals.
     DoubleEndedQueue.Bytes32Deque private _governanceCall;
 
+    // >>> FISSION MOD
+    // Optional: track an “AI-only” voter, store AI reasoning, or record a specialized confidence parameter.
+    // Adjust visibility, data types, or logic to fit your needs.
+
+    /// @notice Address designated as the official AI delegate (if any).
+    address public aiDelegate;
+
+    /// @notice Stores optional AI reasoning logs for each proposalId.
+    mapping(uint256 => string) private _aiReasonLogs;
+
+    /// @notice (Optional) Confidence rating the AI had when casting a vote.
+    mapping(uint256 => uint256) private _aiConfidenceScores;
+
+    /// @dev Emitted when an AI delegate is set or updated.
+    event AIDelegateSet(address indexed oldDelegate, address indexed newDelegate);
+
+    /// @dev Emitted when the AI casts a special vote that includes a confidence score and reasoning log.
+    event AIVoteCast(
+        uint256 indexed proposalId,
+        address indexed voter,
+        uint8 support,
+        uint256 weight,
+        uint256 confidence,
+        string reasoning
+    );
+    // <<< FISSION MOD
+
     /**
-     * @dev Restricts a function so it can only be executed through governance proposals. For example, governance
-     * parameter setters in {GovernorSettings} are protected using this modifier.
-     *
-     * The governance executing address may be different from the Governor's own address, for example it could be a
-     * timelock. This can be customized by modules by overriding {_executor}. The executor is only able to invoke these
-     * functions during the execution of the governor's {execute} function, and not under any other circumstances. Thus,
-     * for example, additional timelock proposers are not able to change governance parameters without going through the
-     * governance protocol (since v4.6).
+     * @dev Restricts a function so it can only be executed through governance proposals.
      */
     modifier onlyGovernance() {
         _checkGovernance();
@@ -92,7 +115,7 @@ abstract contract Governor is Context, ERC165, EIP712, Nonces, IGovernor, IERC72
     function supportsInterface(bytes4 interfaceId) public view virtual override(IERC165, ERC165) returns (bool) {
         return
             interfaceId == type(IGovernor).interfaceId ||
-            interfaceId == type(IGovernor).interfaceId ^ IGovernor.getProposalId.selector ||
+            interfaceId == (type(IGovernor).interfaceId ^ IGovernor.getProposalId.selector) ||
             interfaceId == type(IERC1155Receiver).interfaceId ||
             super.supportsInterface(interfaceId);
     }
@@ -113,16 +136,6 @@ abstract contract Governor is Context, ERC165, EIP712, Nonces, IGovernor, IERC72
 
     /**
      * @dev See {IGovernor-hashProposal}.
-     *
-     * The proposal id is produced by hashing the ABI encoded `targets` array, the `values` array, the `calldatas` array
-     * and the descriptionHash (bytes32 which itself is the keccak256 hash of the description string). This proposal id
-     * can be produced from the proposal data which is part of the {ProposalCreated} event. It can even be computed in
-     * advance, before the proposal is submitted.
-     *
-     * Note that the chainId and the governor address are not part of the proposal id computation. Consequently, the
-     * same proposal (with same operation and same description) will have the same id if submitted on multiple governors
-     * across multiple networks. This also means that in order to execute the same operation twice (on the same
-     * governor) the proposer will have to change the description in order to avoid proposal id conflicts.
      */
     function hashProposal(
         address[] memory targets,
@@ -149,7 +162,6 @@ abstract contract Governor is Context, ERC165, EIP712, Nonces, IGovernor, IERC72
      * @dev See {IGovernor-state}.
      */
     function state(uint256 proposalId) public view virtual returns (ProposalState) {
-        // We read the struct fields into the stack at once so Solidity emits a single SLOAD
         ProposalCore storage proposal = _proposals[proposalId];
         bool proposalExecuted = proposal.executed;
         bool proposalCanceled = proposal.canceled;
@@ -230,9 +242,7 @@ abstract contract Governor is Context, ERC165, EIP712, Nonces, IGovernor, IERC72
     }
 
     /**
-     * @dev Reverts if the `msg.sender` is not the executor. In case the executor is not this contract
-     * itself, the function reverts if `msg.data` is not whitelisted as a result of an {execute}
-     * operation. See {onlyGovernance}.
+     * @dev Reverts if the `msg.sender` is not the executor. 
      */
     function _checkGovernance() internal virtual {
         if (_executor() != _msgSender()) {
@@ -240,7 +250,6 @@ abstract contract Governor is Context, ERC165, EIP712, Nonces, IGovernor, IERC72
         }
         if (_executor() != address(this)) {
             bytes32 msgDataHash = keccak256(_msgData());
-            // loop until popping the expected operation - throw if deque is empty (operation not authorized)
             while (_governanceCall.popFront() != msgDataHash) {}
         }
     }
@@ -256,14 +265,12 @@ abstract contract Governor is Context, ERC165, EIP712, Nonces, IGovernor, IERC72
     function _voteSucceeded(uint256 proposalId) internal view virtual returns (bool);
 
     /**
-     * @dev Get the voting weight of `account` at a specific `timepoint`, for a vote as described by `params`.
+     * @dev Get the voting weight of `account` at a specific `timepoint`.
      */
     function _getVotes(address account, uint256 timepoint, bytes memory params) internal view virtual returns (uint256);
 
     /**
-     * @dev Register a vote for `proposalId` by `account` with a given `support`, voting `weight` and voting `params`.
-     *
-     * Note: Support is generic and can represent various things depending on the voting system used.
+     * @dev Register a vote for `proposalId` by `account`.
      */
     function _countVote(
         uint256 proposalId,
@@ -274,24 +281,19 @@ abstract contract Governor is Context, ERC165, EIP712, Nonces, IGovernor, IERC72
     ) internal virtual returns (uint256);
 
     /**
-     * @dev Hook that should be called every time the tally for a proposal is updated.
-     *
-     * Note: This function must run successfully. Reverts will result in the bricking of governance
+     * @dev Hook called every time the tally for a proposal is updated.
      */
     function _tallyUpdated(uint256 proposalId) internal virtual {}
 
     /**
-     * @dev Default additional encoded parameters used by castVote methods that don't include them
-     *
-     * Note: Should be overridden by specific implementations to use an appropriate value, the
-     * meaning of the additional params, in the context of that implementation
+     * @dev Default additional encoded parameters used by castVote methods without them.
      */
     function _defaultParams() internal view virtual returns (bytes memory) {
         return "";
     }
 
     /**
-     * @dev See {IGovernor-propose}. This function has opt-in frontrunning protection, described in {_isValidDescriptionForProposer}.
+     * @dev See {IGovernor-propose}.
      */
     function propose(
         address[] memory targets,
@@ -319,9 +321,7 @@ abstract contract Governor is Context, ERC165, EIP712, Nonces, IGovernor, IERC72
     }
 
     /**
-     * @dev Internal propose mechanism. Can be overridden to add more logic on proposal creation.
-     *
-     * Emits a {IGovernor-ProposalCreated} event.
+     * @dev Internal propose mechanism.
      */
     function _propose(
         address[] memory targets,
@@ -358,8 +358,6 @@ abstract contract Governor is Context, ERC165, EIP712, Nonces, IGovernor, IERC72
             snapshot + duration,
             description
         );
-
-        // Using a named return variable to avoid stack too deep errors
     }
 
     /**
@@ -388,17 +386,7 @@ abstract contract Governor is Context, ERC165, EIP712, Nonces, IGovernor, IERC72
     }
 
     /**
-     * @dev Internal queuing mechanism. Can be overridden (without a super call) to modify the way queuing is
-     * performed (for example adding a vault/timelock).
-     *
-     * This is empty by default, and must be overridden to implement queuing.
-     *
-     * This function returns a timestamp that describes the expected ETA for execution. If the returned value is 0
-     * (which is the default value), the core will consider queueing did not succeed, and the public {queue} function
-     * will revert.
-     *
-     * NOTE: Calling this function directly will NOT check the current state of the proposal, or emit the
-     * `ProposalQueued` event. Queuing a proposal should be done using {queue}.
+     * @dev Internal queuing mechanism. 
      */
     function _queueOperations(
         uint256 /*proposalId*/,
@@ -426,10 +414,8 @@ abstract contract Governor is Context, ERC165, EIP712, Nonces, IGovernor, IERC72
             _encodeStateBitmap(ProposalState.Succeeded) | _encodeStateBitmap(ProposalState.Queued)
         );
 
-        // mark as executed before calls to avoid reentrancy
         _proposals[proposalId].executed = true;
 
-        // before execute: register governance call in queue.
         if (_executor() != address(this)) {
             for (uint256 i = 0; i < targets.length; ++i) {
                 if (targets[i] == address(this)) {
@@ -440,7 +426,6 @@ abstract contract Governor is Context, ERC165, EIP712, Nonces, IGovernor, IERC72
 
         _executeOperations(proposalId, targets, values, calldatas, descriptionHash);
 
-        // after execute: cleanup governance call queue.
         if (_executor() != address(this) && !_governanceCall.empty()) {
             _governanceCall.clear();
         }
@@ -451,11 +436,7 @@ abstract contract Governor is Context, ERC165, EIP712, Nonces, IGovernor, IERC72
     }
 
     /**
-     * @dev Internal execution mechanism. Can be overridden (without a super call) to modify the way execution is
-     * performed (for example adding a vault/timelock).
-     *
-     * NOTE: Calling this function directly will NOT check the current state of the proposal, set the executed flag to
-     * true or emit the `ProposalExecuted` event. Executing a proposal should be done using {execute}.
+     * @dev Internal execution mechanism.
      */
     function _executeOperations(
         uint256 /* proposalId */,
@@ -479,9 +460,6 @@ abstract contract Governor is Context, ERC165, EIP712, Nonces, IGovernor, IERC72
         bytes[] memory calldatas,
         bytes32 descriptionHash
     ) public virtual returns (uint256) {
-        // The proposalId will be recomputed in the `_cancel` call further down. However we need the value before we
-        // do the internal call, because we need to check the proposal state BEFORE the internal `_cancel` call
-        // changes it. The `getProposalId` duplication has a cost that is limited, and that we accept.
         uint256 proposalId = getProposalId(targets, values, calldatas, descriptionHash);
 
         address caller = _msgSender();
@@ -491,10 +469,7 @@ abstract contract Governor is Context, ERC165, EIP712, Nonces, IGovernor, IERC72
     }
 
     /**
-     * @dev Internal cancel mechanism with minimal restrictions. A proposal can be cancelled in any state other than
-     * Canceled, Expired, or Executed. Once cancelled a proposal can't be re-submitted.
-     *
-     * Emits a {IGovernor-ProposalCanceled} event.
+     * @dev Internal cancel mechanism.
      */
     function _cancel(
         address[] memory targets,
@@ -628,10 +603,7 @@ abstract contract Governor is Context, ERC165, EIP712, Nonces, IGovernor, IERC72
     }
 
     /**
-     * @dev Internal vote casting mechanism: Check that the vote is pending, that it has not been cast yet, retrieve
-     * voting weight using {IGovernor-getVotes} and call the {_countVote} internal function. Uses the _defaultParams().
-     *
-     * Emits a {IGovernor-VoteCast} event.
+     * @dev Internal vote casting mechanism for standard voters.
      */
     function _castVote(
         uint256 proposalId,
@@ -643,10 +615,7 @@ abstract contract Governor is Context, ERC165, EIP712, Nonces, IGovernor, IERC72
     }
 
     /**
-     * @dev Internal vote casting mechanism: Check that the vote is pending, that it has not been cast yet, retrieve
-     * voting weight using {IGovernor-getVotes} and call the {_countVote} internal function.
-     *
-     * Emits a {IGovernor-VoteCast} event.
+     * @dev Internal vote casting mechanism with extended params.
      */
     function _castVote(
         uint256 proposalId,
@@ -667,15 +636,11 @@ abstract contract Governor is Context, ERC165, EIP712, Nonces, IGovernor, IERC72
         }
 
         _tallyUpdated(proposalId);
-
         return votedWeight;
     }
 
     /**
-     * @dev Relays a transaction or function call to an arbitrary target. In cases where the governance executor
-     * is some contract other than the governor itself, like when using a timelock, this function can be invoked
-     * in a governance proposal to recover tokens or Ether that was sent to the governor contract by mistake.
-     * Note that if the executor is simply the governor itself, use of `relay` is redundant.
+     * @dev Relays a transaction or function call to an arbitrary target.
      */
     function relay(address target, uint256 value, bytes calldata data) external payable virtual onlyGovernance {
         (bool success, bytes memory returndata) = target.call{value: value}(data);
@@ -683,8 +648,7 @@ abstract contract Governor is Context, ERC165, EIP712, Nonces, IGovernor, IERC72
     }
 
     /**
-     * @dev Address through which the governor executes action. Will be overloaded by module that execute actions
-     * through another contract such as a timelock.
+     * @dev Address through which the governor executes action. Overridden by modules that use a timelock.
      */
     function _executor() internal view virtual returns (address) {
         return address(this);
@@ -692,7 +656,6 @@ abstract contract Governor is Context, ERC165, EIP712, Nonces, IGovernor, IERC72
 
     /**
      * @dev See {IERC721Receiver-onERC721Received}.
-     * Receiving tokens is disabled if the governance executor is other than the governor itself (eg. when using with a timelock).
      */
     function onERC721Received(address, address, uint256, bytes memory) public virtual returns (bytes4) {
         if (_executor() != address(this)) {
@@ -703,7 +666,6 @@ abstract contract Governor is Context, ERC165, EIP712, Nonces, IGovernor, IERC72
 
     /**
      * @dev See {IERC1155Receiver-onERC1155Received}.
-     * Receiving tokens is disabled if the governance executor is other than the governor itself (eg. when using with a timelock).
      */
     function onERC1155Received(address, address, uint256, uint256, bytes memory) public virtual returns (bytes4) {
         if (_executor() != address(this)) {
@@ -714,7 +676,6 @@ abstract contract Governor is Context, ERC165, EIP712, Nonces, IGovernor, IERC72
 
     /**
      * @dev See {IERC1155Receiver-onERC1155BatchReceived}.
-     * Receiving tokens is disabled if the governance executor is other than the governor itself (eg. when using with a timelock).
      */
     function onERC1155BatchReceived(
         address,
@@ -730,26 +691,14 @@ abstract contract Governor is Context, ERC165, EIP712, Nonces, IGovernor, IERC72
     }
 
     /**
-     * @dev Encodes a `ProposalState` into a `bytes32` representation where each bit enabled corresponds to
-     * the underlying position in the `ProposalState` enum. For example:
-     *
-     * 0x000...10000
-     *   ^^^^^^------ ...
-     *         ^----- Succeeded
-     *          ^---- Defeated
-     *           ^--- Canceled
-     *            ^-- Active
-     *             ^- Pending
+     * @dev Encode a `ProposalState` into a `bytes32` representation for state validation.
      */
     function _encodeStateBitmap(ProposalState proposalState) internal pure returns (bytes32) {
         return bytes32(1 << uint8(proposalState));
     }
 
     /**
-     * @dev Check that the current state of a proposal matches the requirements described by the `allowedStates` bitmap.
-     * This bitmap should be built using `_encodeStateBitmap`.
-     *
-     * If requirements are not met, reverts with a {GovernorUnexpectedProposalState} error.
+     * @dev Validate current state of a proposal matches the required `allowedStates` bitmap.
      */
     function _validateStateBitmap(uint256 proposalId, bytes32 allowedStates) internal view returns (ProposalState) {
         ProposalState currentState = state(proposalId);
@@ -761,20 +710,6 @@ abstract contract Governor is Context, ERC165, EIP712, Nonces, IGovernor, IERC72
 
     /*
      * @dev Check if the proposer is authorized to submit a proposal with the given description.
-     *
-     * If the proposal description ends with `#proposer=0x???`, where `0x???` is an address written as a hex string
-     * (case insensitive), then the submission of this proposal will only be authorized to said address.
-     *
-     * This is used for frontrunning protection. By adding this pattern at the end of their proposal, one can ensure
-     * that no other address can submit the same proposal. An attacker would have to either remove or change that part,
-     * which would result in a different proposal id.
-     *
-     * If the description does not match this pattern, it is unrestricted and anyone can submit it. This includes:
-     * - If the `0x???` part is not a valid hex string.
-     * - If the `0x???` part is a valid hex string, but does not contain exactly 40 hex digits.
-     * - If it ends with the expected suffix followed by newlines or other whitespace.
-     * - If it ends with some other similar suffix, e.g. `#other=abc`.
-     * - If it does not end with any such suffix.
      */
     function _isValidDescriptionForProposer(
         address proposer,
@@ -782,30 +717,20 @@ abstract contract Governor is Context, ERC165, EIP712, Nonces, IGovernor, IERC72
     ) internal view virtual returns (bool) {
         unchecked {
             uint256 length = bytes(description).length;
-
-            // Length is too short to contain a valid proposer suffix
             if (length < 52) {
                 return true;
             }
-
-            // Extract what would be the `#proposer=` marker beginning the suffix
             bytes10 marker = bytes10(_unsafeReadBytesOffset(bytes(description), length - 52));
-
-            // If the marker is not found, there is no proposer suffix to check
             if (marker != bytes10("#proposer=")) {
                 return true;
             }
-
-            // Check that the last 42 characters (after the marker) are a properly formatted address.
             (bool success, address recovered) = Strings.tryParseAddress(description, length - 42, length);
             return !success || recovered == proposer;
         }
     }
 
     /**
-     * @dev Check if the `caller` can cancel the proposal with the given `proposalId`.
-     *
-     * The default implementation allows the proposal proposer to cancel the proposal during the pending state.
+     * @dev Default is to allow the proposal proposer to cancel it if it's still pending.
      */
     function _validateCancel(uint256 proposalId, address caller) internal view virtual returns (bool) {
         return (state(proposalId) == ProposalState.Pending) && caller == proposalProposer(proposalId);
@@ -819,7 +744,6 @@ abstract contract Governor is Context, ERC165, EIP712, Nonces, IGovernor, IERC72
     /**
      * @inheritdoc IERC6372
      */
-    // solhint-disable-next-line func-name-mixedcase
     function CLOCK_MODE() public view virtual returns (string memory);
 
     /**
@@ -839,14 +763,66 @@ abstract contract Governor is Context, ERC165, EIP712, Nonces, IGovernor, IERC72
 
     /**
      * @dev Reads a bytes32 from a bytes array without bounds checking.
-     *
-     * NOTE: making this function internal would mean it could be used with memory unsafe offset, and marking the
-     * assembly block as such would prevent some optimizations.
      */
     function _unsafeReadBytesOffset(bytes memory buffer, uint256 offset) private pure returns (bytes32 value) {
-        // This is not memory safe in the general case, but all calls to this private function are within bounds.
         assembly ("memory-safe") {
             value := mload(add(buffer, add(0x20, offset)))
         }
     }
+
+    // >>> FISSION MOD
+
+    /**
+     * @dev Assign a specific address as the AI delegate.
+     *      This allows you to secure specialized rights for an AI agent
+     *      (e.g., only that address can call `castAIVote`).
+     */
+    function setAIDelegate(address newDelegate) external onlyGovernance {
+        emit AIDelegateSet(aiDelegate, newDelegate);
+        aiDelegate = newDelegate;
+    }
+
+    /**
+     * @dev Let a recognized AI delegate cast a vote with a confidence parameter and
+     *      reasoning log, which is stored on-chain.
+     *
+     * Requirements:
+     * - Caller must match `aiDelegate`, if set.
+     * - Proposal must be in Active state.
+     */
+    function castAIVote(
+        uint256 proposalId,
+        uint8 support,
+        uint256 confidence,
+        string calldata aiReason
+    ) external returns (uint256) {
+        require(aiDelegate == address(0) || _msgSender() == aiDelegate, "Governor: caller not AI delegate");
+        _validateStateBitmap(proposalId, _encodeStateBitmap(ProposalState.Active));
+
+        uint256 weight = _getVotes(_msgSender(), proposalSnapshot(proposalId), _defaultParams());
+        uint256 votedWeight = _countVote(proposalId, _msgSender(), support, weight, _defaultParams());
+
+        _aiReasonLogs[proposalId] = aiReason;
+        _aiConfidenceScores[proposalId] = confidence;
+
+        emit AIVoteCast(proposalId, _msgSender(), support, votedWeight, confidence, aiReason);
+
+        _tallyUpdated(proposalId);
+        return votedWeight;
+    }
+
+    /**
+     * @dev Optionally retrieve the stored AI reason log for a given proposal.
+     */
+    function getAIReasonLog(uint256 proposalId) external view returns (string memory) {
+        return _aiReasonLogs[proposalId];
+    }
+
+    /**
+     * @dev Optionally retrieve the AI confidence score for a given proposal.
+     */
+    function getAIConfidence(uint256 proposalId) external view returns (uint256) {
+        return _aiConfidenceScores[proposalId];
+    }
+    // <<< FISSION MOD
 }
